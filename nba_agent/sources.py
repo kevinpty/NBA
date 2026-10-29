@@ -182,7 +182,7 @@ def update_logs(con, now, max_age_hours=6, force=False):
     # Always try ESPN for the recent tail so early-season games are added even if the NBA endpoint
     # returned last season successfully. If no database history exists, backfill 45 days.
     if count_before == 0:
-        start = pd.Timestamp(now.date()) - pd.Timedelta(days=45)
+        start = pd.Timestamp(now.date()) - pd.Timedelta(days=380)
     else:
         start = pd.Timestamp(mx) + pd.Timedelta(days=1) if mx else pd.Timestamp(now.date()) - pd.Timedelta(days=21)
         start = min(start, pd.Timestamp(now.date()) - pd.Timedelta(days=21))
