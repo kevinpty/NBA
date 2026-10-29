@@ -74,6 +74,18 @@ def _split(s):
     try: a, b = str(s).split("-"); return float(a), float(b)
     except Exception: return 0.0, 0.0
 
+def _is_regular_season(event):
+    """Exclude preseason and playoff games when ESPN exposes the season type."""
+    season = event.get("season") or {}
+    season_type = season.get("type")
+    if season_type is not None:
+        try:
+            return int(season_type) == 2
+        except (TypeError, ValueError):
+            return "regular" in str(season_type).lower()
+    name = str(season.get("name", "")).lower()
+    return not name or "preseason" not in name and "playoff" not in name
+
 def _minutes(value):
     """Parse ESPN minutes as either decimal minutes or MM:SS."""
     try:
@@ -96,7 +108,7 @@ def logs_espn(dates):
             errors.append(f"scoreboard {d}: {type(exc).__name__}")
             continue
         for ev in sb.get("events", []):
-            if not ev.get("status", {}).get("type", {}).get("completed"):
+            if not _is_regular_season(ev) or not ev.get("status", {}).get("type", {}).get("completed"):
                 continue
             try:
                 s = get_json(f"{ESPN}/summary", {"event": ev["id"]})
@@ -276,7 +288,7 @@ def update_period_scores(con, now):
     n = 0
     for d in pd.date_range(start, end).strftime("%Y-%m-%d"):
         for ev in get_json(f"{ESPN}/scoreboard", {"dates": d.replace("-", "")}).get("events", []):
-            if not ev["status"]["type"].get("completed"): continue
+            if not _is_regular_season(ev) or not ev.get("status", {}).get("type", {}).get("completed"): continue
             comp = ev["competitions"][0]["competitors"]; teams = [norm_team(c["team"]["displayName"]) for c in comp]
             for c, opp in zip(comp, reversed(teams)):
                 ls = [float(x.get("value", 0)) for x in c.get("linescores", [])]
