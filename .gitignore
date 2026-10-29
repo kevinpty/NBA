@@ -1,0 +1,8 @@
+.env
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+reports/
+agent.log
