@@ -5,9 +5,9 @@ guarantee profit. Check your local laws, and never stake money you can't afford 
 
 ## Setup
     pip install -r requirements.txt
-    # Copy .env.example to .env and put your The Odds API key in .env
+    # Copy `.env.example` to `.env` and put your your new The Odds API key in `.env`
     # Keep .env private; it is excluded from Git by .gitignore.
-    python run.py demo             # offline smoke test on synthetic data
+    python -m compileall -q nba_agent run.py && python run.py demo             # offline smoke test on synthetic data
 
 ## Run automatically
     # crontab -e   (every 10 min; the agent decides internally whether a game is due for a refresh)
