@@ -11,7 +11,7 @@ permissions:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -38,6 +38,21 @@ jobs:
           fi
           set -o pipefail
           python -u run.py cycle 2>&1 | tee reports/live-cycle.log
+      - name: Verify live ingestion wrote historical data
+        if: env.ODDS_API_KEY != ''
+        run: |
+          python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect("nba_agent.db")
+          counts = {
+              "player_logs": db.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0],
+              "events": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+              "odds_snapshots": db.execute("SELECT COUNT(*) FROM odds_snapshots").fetchone()[0],
+          }
+          print("Live database row counts:", counts)
+          if counts["player_logs"] == 0:
+              raise SystemExit("Live ingestion failed: no historical player logs were stored.")
+          PY
       - name: Upload live run reports
         if: always()
         uses: actions/upload-artifact@v4
