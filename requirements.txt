@@ -1,0 +1,5 @@
+numpy
+pandas
+scipy
+nba_api
+python-dotenv
