@@ -15,16 +15,38 @@ def season_str(now):
     y = now.year if now.month >= 10 else now.year - 1
     return f"{y}-{str(y + 1)[2:]}"
 
-def get_json(url, params=None, retries=3, timeout=25):
-    if params: url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+def get_json(url, params=None, retries=4, timeout=25):
+    """Fetch JSON with browser-like headers and safe, endpoint-only errors."""
+    if params:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+    safe_url = url.split("?", 1)[0]
+    last_error = None
     for i in range(retries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+                "Accept": "application/json,text/plain,*/*",
+                "Accept-Encoding": "identity",
+                "Referer": "https://www.espn.com/",
+                "Cache-Control": "no-cache",
+            }
+            if "stats.nba.com" in url:
+                headers.update({"Origin": "https://www.nba.com", "Referer": "https://www.nba.com/",
+                                "x-nba-stats-origin": "stats", "x-nba-stats-token": "true"})
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.load(r)
-        except Exception:
-            if i == retries - 1: raise
-            time.sleep(2 ** i)
+                raw = r.read()
+            if not raw.strip():
+                raise ValueError("empty response body")
+            try:
+                return json.loads(raw.decode("utf-8-sig"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError(f"non-JSON response from {safe_url} ({type(exc).__name__})") from None
+        except Exception as exc:
+            last_error = exc
+            if i < retries - 1:
+                time.sleep(min(2 ** i, 8))
+    raise RuntimeError(f"JSON request failed for {safe_url}: {type(last_error).__name__}: {last_error}") from None
 
 LOG_COLS = ["game_id", "game_date", "player", "player_key", "team", "opp", "home", "min", "pts", "reb",
             "ast", "stl", "blk", "tov", "fg3m", "fg3a", "fga", "fta", "oreb", "starter"]
@@ -52,57 +74,128 @@ def _split(s):
     try: a, b = str(s).split("-"); return float(a), float(b)
     except Exception: return 0.0, 0.0
 
+def _minutes(value):
+    """Parse ESPN minutes as either decimal minutes or MM:SS."""
+    try:
+        s = str(value or "0").strip()
+        if ":" in s:
+            mm, ss = s.split(":", 1)
+            return float(mm) + float(ss) / 60.0
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
 def logs_espn(dates):
+    """Read completed ESPN scoreboards and summaries; tolerate a single bad event."""
     rows = []
+    errors = []
     for d in dates:
-        sb = get_json(f"{ESPN}/scoreboard", {"dates": d.replace("-", "")})
+        try:
+            sb = get_json(f"{ESPN}/scoreboard", {"dates": d.replace("-", "")})
+        except Exception as exc:
+            errors.append(f"scoreboard {d}: {type(exc).__name__}")
+            continue
         for ev in sb.get("events", []):
-            if not ev["status"]["type"].get("completed"): continue
-            s = get_json(f"{ESPN}/summary", {"event": ev["id"]})
-            names = [norm_team(t["team"]["displayName"]) for t in s["boxscore"]["players"]]
-            home = {norm_team(c["team"]["displayName"]): c["homeAway"] == "home"
-                    for c in s["header"]["competitions"][0]["competitors"]}
-            for tb, team in zip(s["boxscore"]["players"], names):
-                opp = [n for n in names if n != team][0]
-                for grp in tb["statistics"]:
-                    lab = grp.get("labels") or []
-                    for a in grp.get("athletes", []):
-                        if a.get("didNotPlay") or not a.get("stats"): continue
-                        v = dict(zip(lab, a["stats"]))
-                        try: mins = float(v.get("MIN", 0))
-                        except ValueError: continue
-                        if mins <= 0: continue
-                        fgm, fga = _split(v.get("FG")); m3, a3 = _split(v.get("3PT")); _, fta = _split(v.get("FT"))
-                        nm = a["athlete"]["displayName"]
-                        f = lambda k: float(v.get(k, 0) or 0)
-                        rows.append([ev["id"], d, nm, pkey(nm), team, opp, int(home.get(team, False)), mins,
-                                     f("PTS"), f("REB"), f("AST"), f("STL"), f("BLK"), f("TO"), m3, a3, fga, fta,
-                                     f("OREB"), int(bool(a.get("starter")))])
-    return pd.DataFrame(rows, columns=LOG_COLS)
+            if not ev.get("status", {}).get("type", {}).get("completed"):
+                continue
+            try:
+                s = get_json(f"{ESPN}/summary", {"event": ev["id"]})
+                box = s.get("boxscore", {}).get("players", [])
+                comp = s.get("header", {}).get("competitions", [{}])[0].get("competitors", [])
+                if len(box) < 2 or len(comp) < 2:
+                    errors.append(f"summary {ev.get('id')}: missing boxscore/competitors")
+                    continue
+                teams = [norm_team(t.get("team", {}).get("displayName", "")) for t in box]
+                if not all(teams):
+                    errors.append(f"summary {ev.get('id')}: missing team names")
+                    continue
+                home = {norm_team(x.get("team", {}).get("displayName", "")): x.get("homeAway") == "home"
+                        for x in comp}
+                for tb, team in zip(box, teams):
+                    opps = [name for name in teams if name != team]
+                    if not opps:
+                        continue
+                    opp = opps[0]
+                    for grp in tb.get("statistics", []):
+                        labels = grp.get("labels") or []
+                        for athlete in grp.get("athletes", []):
+                            if athlete.get("didNotPlay") or not athlete.get("stats"):
+                                continue
+                            values = dict(zip(labels, athlete["stats"]))
+                            mins = _minutes(values.get("MIN"))
+                            if mins <= 0:
+                                continue
+                            _, fga = _split(values.get("FG"))
+                            m3, a3 = _split(values.get("3PT"))
+                            _, fta = _split(values.get("FT"))
+                            nm = athlete.get("athlete", {}).get("displayName", "")
+                            if not nm:
+                                continue
+                            def stat(key):
+                                try: return float(values.get(key, 0) or 0)
+                                except (TypeError, ValueError): return 0.0
+                            rows.append([str(ev["id"]), d, nm, pkey(nm), team, opp,
+                                         int(home.get(team, False)), mins, stat("PTS"), stat("REB"),
+                                         stat("AST"), stat("STL"), stat("BLK"), stat("TO"), m3, a3,
+                                         fga, fta, stat("OREB"), int(bool(athlete.get("starter")))])
+            except Exception as exc:
+                errors.append(f"summary {ev.get('id')}: {type(exc).__name__}")
+    result = pd.DataFrame(rows, columns=LOG_COLS)
+    result.attrs["fetch_errors"] = errors[:20]
+    return result
 
 def update_logs(con, now, max_age_hours=6, force=False):
     last = store.get_meta(con, "logs_updated")
     if last and not force and (now - store.parse(last)).total_seconds() < max_age_hours * 3600:
         return "logs fresh"
-    frames, src = [], "nba_api"
-    seasons = [season_str(now)]
-    if con.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0] == 0:
-        y = int(seasons[0][:4]); seasons.insert(0, f"{y-1}-{str(y)[2:]}")
-    try:
-        for s in seasons: frames.append(logs_nba_api(s))
-    except Exception as e:
-        src = f"espn fallback ({type(e).__name__})"
-        mx = con.execute("SELECT MAX(game_date) FROM player_logs").fetchone()[0]
-        start = (pd.Timestamp(mx) + pd.Timedelta(days=1)) if mx else (pd.Timestamp(now.date()) - pd.Timedelta(days=14))
-        days = pd.date_range(start, pd.Timestamp(now.date()) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        frames = [logs_espn(list(days))]
-    df = pd.concat(frames) if frames else pd.DataFrame(columns=LOG_COLS)
+    count_before = con.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0]
+    frames, sources_ok, failures = [], [], []
+    current = season_str(now)
+    seasons = [current]
+    if count_before == 0:
+        year = int(current[:4])
+        seasons = [f"{year-1}-{str(year)[2:]}", current]
+    # Isolate season failures: a blocked current-season endpoint must not discard a good prior season.
+    for season in seasons:
+        try:
+            frame = logs_nba_api(season)
+            if not frame.empty:
+                frames.append(frame)
+                sources_ok.append(f"NBA stats {season} ({len(frame)} rows)")
+            else:
+                failures.append(f"NBA stats {season}: empty response")
+        except Exception as exc:
+            failures.append(f"NBA stats {season}: {type(exc).__name__}")
+    mx = con.execute("SELECT MAX(game_date) FROM player_logs").fetchone()[0]
+    # Always try ESPN for the recent tail so early-season games are added even if the NBA endpoint
+    # returned last season successfully. If no database history exists, backfill 45 days.
+    if count_before == 0:
+        start = pd.Timestamp(now.date()) - pd.Timedelta(days=45)
+    else:
+        start = pd.Timestamp(mx) + pd.Timedelta(days=1) if mx else pd.Timestamp(now.date()) - pd.Timedelta(days=21)
+        start = min(start, pd.Timestamp(now.date()) - pd.Timedelta(days=21))
+    end = pd.Timestamp(now.astimezone(ET).date()) - pd.Timedelta(days=1)
+    if start <= end:
+        days = pd.date_range(start, end).strftime("%Y-%m-%d").tolist()
+        try:
+            espn = logs_espn(days)
+            if not espn.empty:
+                frames.append(espn)
+                sources_ok.append(f"ESPN recent boxscores ({len(espn)} rows)")
+            else:
+                failures.append("ESPN recent boxscores: 0 rows")
+                failures.extend(espn.attrs.get("fetch_errors", [])[:5])
+        except Exception as exc:
+            failures.append(f"ESPN recent boxscores: {type(exc).__name__}: {exc}")
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["game_id", "player_key"], keep="last") if frames else pd.DataFrame(columns=LOG_COLS)
     if len(df):
         con.executemany(f"INSERT OR REPLACE INTO player_logs VALUES({','.join('?'*len(LOG_COLS))})",
                         df[LOG_COLS].astype(object).where(df[LOG_COLS].notna(), None).values.tolist())
         con.commit()
-    store.set_meta(con, "logs_updated", store.iso(now))
-    return f"logs updated via {src}: {len(df)} rows"
+        store.set_meta(con, "logs_updated", store.iso(now))
+        return f"logs updated via {' + '.join(sources_ok)}; {len(df)} rows stored" + (f"; warnings: {'; '.join(failures[:5])}" if failures else "")
+    # Do not mark an empty/failed fetch as fresh; next cycle must retry.
+    raise RuntimeError("No historical player logs retrieved. " + "; ".join(failures[:8]))
 
 # ---------------- injuries ----------------
 def update_injuries(con, now):
