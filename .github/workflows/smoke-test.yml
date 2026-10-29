@@ -11,7 +11,7 @@ permissions:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
     steps:
@@ -21,6 +21,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Restore and persist NBA database
+        uses: actions/cache@v4
+        with:
+          path: nba_agent.db
+          key: nba-agent-db-${{ github.run_id }}
+          restore-keys: |
+            nba-agent-db-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -46,14 +53,22 @@ jobs:
           python - <<'PY'
           import sqlite3
           db = sqlite3.connect("nba_agent.db")
+          from datetime import date
           counts = {
               "player_logs": db.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0],
               "events": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
               "odds_snapshots": db.execute("SELECT COUNT(*) FROM odds_snapshots").fetchone()[0],
+              "predictions": db.execute("SELECT COUNT(*) FROM predictions").fetchone()[0],
           }
+          bounds = db.execute("SELECT MIN(game_date), MAX(game_date) FROM player_logs").fetchone()
           print("Live database row counts:", counts)
-          if counts["player_logs"] == 0:
-              raise SystemExit("Live ingestion failed: no historical player logs were stored.")
+          print("Player-log date coverage:", bounds)
+          if counts["player_logs"] < 5000:
+              raise SystemExit("Live ingestion failed: fewer than 5,000 player logs; historical season backfill is incomplete.")
+          if not bounds[0] or (date.fromisoformat(bounds[1]) - date.fromisoformat(bounds[0])).days < 150:
+              raise SystemExit("Live ingestion failed: player-log history covers fewer than 150 days.")
+          if counts["predictions"] == 0:
+              raise SystemExit("Live pipeline failed: no prediction rows were stored.")
           PY
       - name: Upload live run reports
         if: always()
