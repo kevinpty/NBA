@@ -11,6 +11,7 @@ permissions:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -26,3 +27,24 @@ jobs:
         run: python -m compileall -q nba_agent run.py
       - name: Run offline demo
         run: python run.py demo
+      - name: Run live NBA data cycle (when API key is configured)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          mkdir -p reports
+          if [ -z "$ODDS_API_KEY" ]; then
+            echo "::notice::ODDS_API_KEY is not configured; skipping live cycle."
+            exit 0
+          fi
+          set -o pipefail
+          python -u run.py cycle 2>&1 | tee reports/live-cycle.log
+      - name: Upload live run reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-agent-live-run
+          path: |
+            reports/
+            nba_agent.db
+          if-no-files-found: ignore
+          retention-days: 7
