@@ -39,7 +39,9 @@ jobs:
           set -o pipefail
           python -u run.py cycle 2>&1 | tee reports/live-cycle.log
       - name: Verify live ingestion wrote historical data
-        if: env.ODDS_API_KEY != ''
+        if: ${{ secrets.ODDS_API_KEY != '' }}
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python - <<'PY'
           import sqlite3
